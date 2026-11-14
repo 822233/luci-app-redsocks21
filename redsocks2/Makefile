@@ -8,7 +8,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=redsocks2
 PKG_VERSION:=20170730
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 PKG_REV:=3052eeab75ff1ebd20c22334fbbecd808525bca7
 PKG_BUILD_DEPENDS:=libevent2
 
