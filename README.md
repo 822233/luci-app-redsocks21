@@ -85,8 +85,9 @@ opkg install /tmp/luci-app-redsocks2_1.0.3-r16_all.ipk
 
 - `redsocks2`：代理转发核心。
 - `luci-app-redsocks2`：LuCI 管理界面。
-- 推送到 `immortalwrt-24.10-https` 分支会触发编译和 Release 发布。
-- 也可以在 Actions 页面手动触发编译。
+- 推送到开发分支或向 `master` / `immortalwrt-24.10-https` 提交 Pull Request 时会触发编译检查，不会自动覆盖现有 Release。
+- 只有推送与 Makefile 版本一致的标签（例如 `v1.0.3-r16`）才会发布 GitHub Release；标签格式必须为 `v{PKG_VERSION}-r{PKG_RELEASE}`。
+- 也可以在 Actions 页面手动触发编译，手动构建只生成构建产物，不发布 Release。
 
 [查看 GitHub Actions 编译记录](https://github.com/822233/luci-app-redsocks2/actions)
 
