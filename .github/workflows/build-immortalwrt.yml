@@ -12,7 +12,7 @@ on:
       - immortalwrt-24.10-https
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -147,10 +147,33 @@ jobs:
             printf '%s\n' "$control"
           done
           sha256sum "${ipks[@]}"
+          sha256sum "$GITHUB_WORKSPACE"/dist/*.ipk > "$GITHUB_WORKSPACE/dist/SHA256SUMS"
 
       - name: 上传编译产物
         uses: actions/upload-artifact@v4
         with:
           name: redsocks2-immortalwrt-mediatek-filogic
-          path: dist/*.ipk
+          path: dist/*
           if-no-files-found: error
+
+      - name: 发布到 GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.3-r16
+          name: Redsocks2 v1.0.3-r16（ImmortalWrt 24.10 / MT7981）
+          body: |
+            ## Redsocks2 r16
+
+            - LuCI 管理插件版本：1.0.3-r16
+            - 核心包版本：20170730-r3（核心源码未因本次 r16 界面调整而修改）
+            - 目标平台：ImmortalWrt 24.10 / MediaTek Filogic / aarch64 Cortex-A53
+            - r16 更新：优化基本设置页用户名与 Shadowsocks 加密方法标签及字段显示逻辑。
+            - TXT 批量导入页面保持原有自动检测协议行为。
+            
+            首次安装请安装核心和 LuCI 插件；已安装正常核心的用户升级时通常只需安装 LuCI 插件。
+            
+            当前仅支持 IPv4 TCP 透明代理，不支持 UDP、QUIC 或 IPv6 透明代理。
+          files: dist/*
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
