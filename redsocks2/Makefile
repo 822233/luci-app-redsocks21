@@ -24,7 +24,7 @@ define Package/redsocks2
   SECTION:=net
   CATEGORY:=Network
   SUBMENU:=Web Servers/Proxies
-  DEPENDS:=+libevent2 +libevent2-openssl +libopenssl
+  DEPENDS:=+libevent2 +libevent2-openssl +libopenssl +libopenssl-legacy
   TITLE:=Redsocks2 TCP 透明代理核心
 endef
 
