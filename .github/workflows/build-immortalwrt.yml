@@ -17,6 +17,7 @@ on:
     branches:
       - master
       - immortalwrt-24.10-https
+      - maintenance-r16-cleanup
 
 permissions:
   contents: read
