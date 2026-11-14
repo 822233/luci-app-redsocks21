@@ -1,16 +1,23 @@
 #
-# Copyright (C) 2008-2014 The LuCI Team <luci@lists.subsignal.org>
-# Copyright (C) 2015 GuoGuo <gch981213@gmail.com>
-# 
-#
-# This is free software, licensed under the Apache License, Version 2.0 .
+# Copyright (C) 2008-2014 The LuCI Team
+# Apache License, Version 2.0
 #
 
 include $(TOPDIR)/rules.mk
 
-LUCI_TITLE:=LuCI Support for redsocks2
-LUCI_DEPENDS:=+redsocks2
+PKG_NAME:=luci-app-redsocks2
+PKG_VERSION:=1.0.3
+PKG_RELEASE:=16
 
-include ../../luci.mk
+LUCI_TITLE:=Redsocks2 透明代理管理界面
+LUCI_DESCRIPTION:=Redsocks2 TCP 透明代理，支持多节点、订阅导入和网页测速
+LUCI_DEPENDS:=+redsocks2 +curl
+
+include $(TOPDIR)/feeds/luci/luci.mk
+
+# Preserve user configuration across package upgrades.
+define Package/luci-app-redsocks2/conffiles
+/etc/config/redsocks2
+endef
 
 # call BuildPackage - OpenWrt buildroot signature

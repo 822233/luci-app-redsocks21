@@ -1,0 +1,109 @@
+#!/bin/sh
+# Download and safely update the China IPv4 CIDR list used by Redsocks2.
+# The existing list is never replaced unless the downloaded data validates.
+
+set -u
+
+DEFAULT_FILE="/etc/chnroute.txt"
+TMP_DIR="/tmp"
+LOCK_DIR="/var/lock/redsocks2-chnroute.lock"
+URLS="
+https://cdn.jsdelivr.net/gh/gaoyifan/china-operator-ip@ip-lists/china.txt
+https://raw.githubusercontent.com/gaoyifan/china-operator-ip/ip-lists/china.txt
+"
+
+quiet=0
+no_restart=0
+for arg in "$@"; do
+	case "$arg" in
+		--quiet) quiet=1 ;;
+		--no-restart) no_restart=1 ;;
+	esac
+done
+
+log() {
+	[ "$quiet" = "1" ] || echo "Redsocks2 China IPv4: $*"
+	logger -t redsocks2-chnroute "$*" 2>/dev/null || true
+}
+
+target="$(uci -q get redsocks2.@redsocks2_iptables[0].ipset_whitelist 2>/dev/null || true)"
+[ -n "$target" ] || target="$DEFAULT_FILE"
+
+case "$target" in
+	/*) ;;
+	*) log "拒绝非绝对路径：$target"; exit 1 ;;
+esac
+
+mkdir -p "$TMP_DIR" /var/lock || exit 1
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+	log "更新任务正在运行，跳过本次更新"
+	exit 0
+fi
+trap 'rm -rf "$LOCK_DIR"; rm -f "${download:-}" "${validated:-}"' EXIT INT TERM
+
+download="$(mktemp "$TMP_DIR/chnroute.download.XXXXXX")" || exit 1
+validated="$(mktemp "$TMP_DIR/chnroute.validated.XXXXXX")" || exit 1
+fetched=0
+
+for url in $URLS; do
+	log "正在下载国内 IPv4 网段列表"
+	if command -v uclient-fetch >/dev/null 2>&1; then
+		if uclient-fetch -T 25 -O "$download" "$url" >/dev/null 2>&1; then
+			fetched=1
+		fi
+	elif command -v wget >/dev/null 2>&1; then
+		if wget -T 25 -t 1 -q -O "$download" "$url"; then
+			fetched=1
+		fi
+	fi
+	[ "$fetched" = "1" ] && break
+done
+
+if [ "$fetched" != "1" ]; then
+	log "下载失败，保留现有列表"
+	exit 1
+fi
+
+if ! awk '
+{
+	line=$0
+	gsub(/\r/, "", line)
+	gsub(/[ \t]/, "", line)
+	sub(/#.*/, "", line)
+	if (line == "") next
+
+	n=split(line, parts, "/")
+	if (n > 2 || n < 1) { bad=1; exit }
+	if (n == 2 && (parts[2] !~ /^[0-9]+$/ || parts[2] < 0 || parts[2] > 32)) { bad=1; exit }
+
+	o=split(parts[1], octets, "[.]")
+	if (o != 4) { bad=1; exit }
+	for (i=1; i<=4; i++) {
+		if (octets[i] !~ /^[0-9]+$/ || octets[i] < 0 || octets[i] > 255) { bad=1; exit }
+	}
+	print line
+	count++
+}
+END {
+	if (bad || count < 500) exit 1
+}' "$download" > "$validated"; then
+	log "列表格式校验失败或网段数量异常，保留现有列表"
+	exit 1
+fi
+
+mkdir -p "$(dirname "$target")" || exit 1
+chmod 0644 "$validated"
+if ! mv -f "$validated" "$target"; then
+	log "写入失败，保留现有列表"
+	exit 1
+fi
+
+count="$(wc -l < "$target" | tr -d ' ')"
+date '+%Y-%m-%d %H:%M:%S' > /etc/chnroute.last_update
+echo "$count" > /etc/chnroute.count
+log "更新成功：$count 条 IPv4 网段"
+
+if [ "$no_restart" != "1" ] && [ -s /var/run/redsocks2.pid ]; then
+	/etc/init.d/redsocks2 restart >/dev/null 2>&1 || log "列表已更新，但 Redsocks2 重启失败"
+fi
+exit 0

@@ -1,229 +1,256 @@
 #!/bin/sh /etc/rc.common
-# Copyright (C) 2015 GuoGuo <gch981213@gmail.com>
-# Redsocks2 启动脚本
 START=90
+STOP=10
+EXTRA_COMMANDS="migrate"
+EXTRA_HELP="\tmigrate\tMigrate legacy single-node configuration\n"
 APP=redsocks2
-PID_FILE=/var/run/$APP.pid
-CFG_FILE=/var/etc/redsocks2.conf
+PID_FILE=/var/run/${APP}.pid
+CFG_FILE=/var/etc/${APP}.conf
+NFT_TABLE=redsocks2
+LOCK_DIR=/var/lock/redsocks2-service.lock
 
-#程序是否启用 CFG_TYPE=redsocks2_base
-if_enabled() {
-	local cfg="$1"
-	config_get_bool enabled "$cfg" 'enabled' '0'
-	[ $enabled = '0' ] && {
-		echo "redsocks2 is not enabled.Exit now."
-		exit 1
-	}
+config_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+migrate_legacy_node() {
+	local cfg="$1" proxy_host proxy_port proxy_type username password local_ip local_port autoproxy timeout node
+	config_get proxy_host "$cfg" ip
+	config_get proxy_port "$cfg" port
+	[ -n "$proxy_host" ] && [ -n "$proxy_port" ] || return 0
+	node="$(uci add redsocks2 redsocks2_node 2>/dev/null)"
+	[ -n "$node" ] || return 1
+	config_get proxy_type "$cfg" proxy_type https-connect
+	config_get username "$cfg" username
+	if [ "$proxy_type" = "shadowsocks" ]; then
+		config_get username "$cfg" method "$username"
+	fi
+	config_get password "$cfg" password
+	config_get local_ip "$cfg" local_ip 0.0.0.0
+	config_get local_port "$cfg" local_port 11111
+	config_get_bool autoproxy "$cfg" autoproxy 0
+	config_get timeout "$cfg" timeout 3
+	uci set "redsocks2.$node.name=默认节点"
+	uci set "redsocks2.$node.ip=$proxy_host"
+	uci set "redsocks2.$node.port=$proxy_port"
+	uci set "redsocks2.$node.proxy_type=$proxy_type"
+	uci set "redsocks2.$node.username=$username"
+	uci set "redsocks2.$node.password=$password"
+	uci set "redsocks2.$node.local_ip=$local_ip"
+	uci set "redsocks2.$node.local_port=$local_port"
+	uci set "redsocks2.$node.autoproxy=$autoproxy"
+	uci set "redsocks2.$node.timeout=$timeout"
+	uci set "redsocks2.@redsocks2_base[0].active_node=$node"
 }
-
-#基础配置生成 CFG_TYPE=redsocks2_base
-gen_config_base() {
-	local cfg="$1"
-	
-	echo "base {" > $CFG_FILE 
-
-	config_get loglevel "$cfg" 'loglevel'
-	case "$loglevel" in
-		debug)
-			echo "log_debug = on;" >> $CFG_FILE
-			echo "log_info = on;" >> $CFG_FILE
-			;;
-		info)
-			echo "log_debug = off;" >> $CFG_FILE
-			echo "log_info = on;" >> $CFG_FILE
-			;;
-		off)
-			echo "log_debug = off;" >> $CFG_FILE
-			echo "log_info = off;" >> $CFG_FILE
-	esac
-	echo "daemon = on;" >> $CFG_FILE
-	echo "redirector = iptables;" >> $CFG_FILE
-	echo "}" >> $CFG_FILE
+migrate_count_node() { node_count=$((node_count + 1)); }
+migrate_load_active() { config_get active_node "$1" active_node; }
+migrate_check_active() { [ "$1" = "$active_node" ] && active_found=1; }
+migrate_choose_first() {
+	[ -n "$active_node" ] && return
+	active_node="$1"
+	uci set "redsocks2.@redsocks2_base[0].active_node=$1"
 }
-
-#重定向配置文件生成. CFG_TYPE=redsocks2_redirect
-gen_config_redirect() {
-	local cfg="$1"
-
-	config_get local_ip "$cfg" 'local_ip'
-	config_get local_port "$cfg" 'local_port'
-	config_get ip "$cfg" 'ip'
-	config_get port "$cfg" 'port'
-	#代理类型,可选值 socks5 shadowsocks direct
-	config_get proxy_type "$cfg" 'proxy_type'
-	config_get_bool autoproxy "$cfg" 'autoproxy' 0
-	config_get timeout "$cfg" 'timeout'
-	config_get redsocks2_login "$cfg" 'enc_type'
-	[ -z $redsocks2_login ] && config_get redsocks2_login "$cfg" 'username'
-	config_get redsocks2_password "$cfg" 'password'
-	cat >> $CFG_FILE <<EOF
+migrate() {
+	local node_count=0 active_node= active_found=0
+	config_load redsocks2
+	config_foreach migrate_count_node redsocks2_node
+	config_foreach migrate_load_active redsocks2_base
+	config_foreach migrate_check_active redsocks2_node
+	if [ "$node_count" -eq 0 ]; then
+		config_foreach migrate_legacy_node redsocks2_redirect
+		uci commit redsocks2
+		return $?
+	fi
+	if [ "$active_found" != 1 ]; then
+		active_node=
+		config_foreach migrate_choose_first redsocks2_node
+		uci commit redsocks2
+	fi
+	return 0
+}
+gen_base() {
+	local cfg="$1" loglevel
+	config_get loglevel "$cfg" loglevel info
+	cat > "$CFG_FILE" <<EOF
+base {
+	log_debug = $([ "$loglevel" = debug ] && echo on || echo off);
+	log_info = $([ "$loglevel" = off ] && echo off || echo on);
+	daemon = on;
+	redirector = iptables;
+}
+EOF
+}
+gen_redirect() {
+	local cfg="$1" local_ip local_port proxy_host proxy_port proxy_type username method password autoproxy timeout
+	config_get local_ip "$cfg" local_ip 0.0.0.0
+	config_get local_port "$cfg" local_port 11111
+	REDSOCKS2_LOCAL_PORT="$local_port"
+	config_get proxy_host "$cfg" ip
+	config_get proxy_port "$cfg" port
+	config_get proxy_type "$cfg" proxy_type https-connect
+	config_get username "$cfg" username
+	if [ "$proxy_type" = "shadowsocks" ]; then
+		config_get method "$cfg" method "$username"
+		username="$method"
+	fi
+	config_get password "$cfg" password
+	config_get_bool autoproxy "$cfg" autoproxy 0
+	config_get timeout "$cfg" timeout 3
+	[ -n "$proxy_host" ] && [ -n "$proxy_port" ] || return 1
+	case "$local_port" in *[!0-9]*|"") return 1 ;; esac
+	[ "$local_port" -ge 1 ] 2>/dev/null && [ "$local_port" -le 65535 ] 2>/dev/null || return 1
+	case "$proxy_port" in *[!0-9]*|"") return 1 ;; esac
+	[ "$proxy_port" -ge 1 ] 2>/dev/null && [ "$proxy_port" -le 65535 ] 2>/dev/null || return 1
+	proxy_host="$(config_escape "$proxy_host")"
+	username="$(config_escape "$username")"
+	password="$(config_escape "$password")"
+	cat >> "$CFG_FILE" <<EOF
 redsocks {
 	local_ip = $local_ip;
 	local_port = $local_port;
-	ip = $ip;
-	port = $port;
+	ip = "$proxy_host";
+	port = $proxy_port;
 	type = $proxy_type;
 	autoproxy = $autoproxy;
 EOF
-	[ $autoproxy = '1' ] && echo "timeout = $timeout;" >> $CFG_FILE
-	case $proxy_type in
-		socks5 | \
-		shadowsocks)
-			[ ! -z $redsocks2_login ] && {
-				echo "login = \"$redsocks2_login\";" >> $CFG_FILE
-				echo "password = \"$redsocks2_password\";" >> $CFG_FILE
-			}
-			;;
-		direct)
-			config_get interface "$cfg" 'interface'
-			[ ! -z $interface ] && echo "interface = $interface;" >> $CFG_FILE
-			;;
-	esac
-	echo "}" >> $CFG_FILE
-}
-
-#自动代理判断高级设置 CFG_TYPE=redsocks2_autoproxy
-gen_config_autoproxy() {
-	local cfg="$1"
-	config_get no_quick_check_seconds "$cfg" 'no_quick_check_seconds' 300
-	config_get quick_connect_timeout "$cfg" 'quick_connect_timeout' 2
-	cat >> $CFG_FILE <<EOF
-autoproxy {
-	no_quick_check_seconds = $no_quick_check_seconds;
-	quick_connect_timeout = $quick_connect_timeout;
-}
-EOF
-}
-# IP缓存配置生成 CFG_TYPE=redsocks2_ipcache
-gen_config_ipcache() {
-	local cfg="$1"
-	
-	config_get cache_size "$cfg" 'cache_size' 4
-	config_get cache_file "$cfg" 'cache_file' '/tmp/redsocks2_ipcache.txt'
-	config_get stale_time "$cfg" 'stale_time' 7200
-	config_get autosave_interval "cfg" 'autosave_interval' 3600
-	config_get_bool port_check "$cfg" 'port_check' 0
-	
-	cat >> $CFG_FILE <<EOF
-ipcache {
-	cache_size = $cache_size;
-	cache_file = "$cache_file";
-	stale_time = $stale_time;
-	autosave_interval = $autosave_interval;
-	port_check = $port_check;
-}
-EOF
-}
-
-#redsocks2 UDP转发 CFG_TYPE=redsocks2_udprelay
-gen_config_udprelay() {
-	local cfg="$1"
-
-	config_get local_ip "$cfg" 'local_ip'
-	config_get local_port "$cfg" 'local_port'
-	config_get ip "$cfg" 'ip'
-	config_get port "$cfg" 'port'
-	#代理类型,可选值 socks5 shadowsocks direct
-	config_get proxy_type "$cfg" 'proxy_type'
-	config_get udp_timeout "$cfg" 'udp_timeout'
-	config_get redsocks2_login "$cfg" 'enc_type'
-	[ -z $redsocks2_login ] && config_get redsocks2_login "$cfg" 'username'
-	config_get redsocks2_password "$cfg" 'password'
-	config_get dest_ip "$cfg" 'dest_ip'
-	config_get dest_port "$cfg" 'dest_port'
-	cat >> $CFG_FILE <<EOF
-redudp {
-	local_ip = $local_ip;
-	local_port = $local_port;
-	ip = $ip;
-	port = $port;
-	type = $proxy_type;
-	dest_ip = $dest_ip;
-	dest_port = $dest_port;
-	udp_timeout = $udp_timeout;
-EOF
-	case "$proxy_type" in
-		socks5 | \
-		shadowsocks)
-			[ ! -z $redsocks2_login ] && {
-				echo "login = \"$redsocks2_login\";" >> $CFG_FILE
-				echo "password = \"$redsocks2_password\";" >> $CFG_FILE
-			}
-			;;
-		direct)
-			config_get interface "$cfg" 'interface'
-			[ ! -z $interface ] && echo "interface = $interface;" >> $CFG_FILE
-			;;
-	esac
-	echo "}" >> $CFG_FILE
-}
-
-#redsocks2 iptables流量劫持设定 CFG_TYPE=redsocks2_iptables
-redsocks2_iptables_start_instance() {
-	local cfg="$1"
-
-	local CHAIN_NAME="REDSOCKS2_$cfg"
-	config_get blacklist_enabled "$cfg" 'blacklist_enabled'
-	config_get ipset_blacklist "$cfg" 'ipset_blacklist'
-	config_get whitelist_enabled "$cfg" 'whitelist_enabled'
-	config_get ipset_whitelist "$cfg" 'ipset_whitelist'
-	config_get dest_port "$cfg" 'dest_port'
-
-	iptables -t nat -N $CHAIN_NAME
-	iptables -t nat -A $CHAIN_NAME -d 0.0.0.0/8 -j RETURN
-	iptables -t nat -A $CHAIN_NAME -d 10.0.0.0/8 -j RETURN
-	iptables -t nat -A $CHAIN_NAME -d 127.0.0.0/8 -j RETURN
-	iptables -t nat -A $CHAIN_NAME -d 169.254.0.0/16 -j RETURN
-	iptables -t nat -A $CHAIN_NAME -d 172.16.0.0/12 -j RETURN
-	iptables -t nat -A $CHAIN_NAME -d 192.168.0.0/16 -j RETURN
-	iptables -t nat -A $CHAIN_NAME -d 224.0.0.0/4 -j RETURN
-	iptables -t nat -A $CHAIN_NAME -d 240.0.0.0/4 -j RETURN
-
-	[ "$blacklist_enabled" = '1' ] && {
-		sed -e "s/^/-A blacklist &/g" -e "1 i\-N blacklist nethash --hashsize 64" $ipset_blacklist | ipset -R -!
-		iptables -t nat -A $CHAIN_NAME -p tcp -m set --match-set blacklist src -j RETURN
-	}
-	if [ "$whitelist_enabled" = '1' ];then
-		sed -e "s/^/-A whitelist &/g" -e "1 i\-N whitelist nethash --hashsize 4096" $ipset_whitelist | ipset -R -!
-		iptables -t nat -A $CHAIN_NAME -p tcp -m set ! --match-set whitelist dst -j REDIRECT --to-ports "$dest_port"
-	else
-		iptables -t nat -A $CHAIN_NAME -p tcp -j REDIRECT --to-ports "$dest_port"
+	[ "$autoproxy" = 1 ] && echo "	timeout = $timeout;" >> "$CFG_FILE"
+	if [ -n "$username" ]; then
+		echo "	login = \"$username\";" >> "$CFG_FILE"
+		echo "	password = \"$password\";" >> "$CFG_FILE"
 	fi
-
-	iptables -t nat -I zone_lan_prerouting -j $CHAIN_NAME
+	echo "}" >> "$CFG_FILE"
 }
-
-redsocks2_iptables_stop_instance() {
-	local cfg="$1"
-
-	local CHAIN_NAME="REDSOCKS2_$cfg"
-
- 	iptables -t nat -D zone_lan_prerouting -j $CHAIN_NAME &> /dev/null
-	iptables -t nat -F $CHAIN_NAME &> /dev/null
+validate_china_list() {
+	local source="$1" output="$2"
+	awk '
+	{
+		line=$0
+		gsub(/\r/, "", line)
+		gsub(/[ \t]/, "", line)
+		sub(/#.*/, "", line)
+		if (line == "") next
+		n=split(line, part, "/")
+		if (n > 2 || part[1] !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) { bad=1; exit }
+		if (n == 2 && (part[2] !~ /^[0-9]+$/ || part[2] > 32)) { bad=1; exit }
+		o=split(part[1], octet, "[.]")
+		for (i=1; i<=4; i++) if (octet[i] > 255) { bad=1; exit }
+		print line
+		count++
+	}
+	END { if (bad || count < 100) exit 1 }
+	' "$source" > "$output"
+}
+setup_nft() {
+	local cfg="$1" whitelist_enabled whitelist_file local_port lan_dev batch list_file
+	config_get_bool whitelist_enabled "$cfg" whitelist_enabled 0
+	config_get whitelist_file "$cfg" ipset_whitelist /etc/chnroute.txt
+	local_port="$REDSOCKS2_LOCAL_PORT"
+	[ -n "$local_port" ] || local_port=11111
+	lan_dev="$(ubus call network.interface.lan status 2>/dev/null | jsonfilter -e '@.device' 2>/dev/null)"
+	[ -n "$lan_dev" ] || lan_dev=br-lan
+	case "$lan_dev" in *[!a-zA-Z0-9_.:-]*) lan_dev=br-lan ;; esac
+	batch="$(mktemp /tmp/redsocks2.nft.XXXXXX)" || return 1
+	list_file="$(mktemp /tmp/redsocks2.china.XXXXXX)" || { rm -f "$batch"; return 1; }
+	if [ "$whitelist_enabled" = 1 ]; then
+		if [ ! -s "$whitelist_file" ] || [ ! -r "$whitelist_file" ] || ! validate_china_list "$whitelist_file" "$list_file"; then
+			logger -t redsocks2 "Domestic IPv4 list missing or invalid: $whitelist_file"
+			rm -f "$batch" "$list_file"
+			return 1
+		fi
+	fi
+	{
+		echo "add table inet $NFT_TABLE"
+		echo "add chain inet $NFT_TABLE prerouting { type nat hook prerouting priority -99; policy accept; }"
+		echo "add rule inet $NFT_TABLE prerouting iifname \"$lan_dev\" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 } return"
+		if [ "$whitelist_enabled" = 1 ]; then
+			echo "add set inet $NFT_TABLE china4 { type ipv4_addr; flags interval; auto-merge; }"
+			awk 'BEGIN { print "add element inet '"$NFT_TABLE"' china4 {" } { if (NR > 1) printf ",\n"; printf " %s", $0 } END { print "\n}" }' "$list_file"
+			echo "add rule inet $NFT_TABLE prerouting iifname \"$lan_dev\" ip daddr @china4 return"
+		fi
+		echo "add rule inet $NFT_TABLE prerouting iifname \"$lan_dev\" meta l4proto tcp redirect to :$local_port"
+	} > "$batch"
+	nft delete table inet "$NFT_TABLE" 2>/dev/null || true
+	if ! nft -f "$batch"; then
+		logger -t redsocks2 "Failed to apply nftables rules; transparent proxy remains disabled"
+		rm -f "$batch" "$list_file"
+		return 1
+	fi
+	rm -f "$batch" "$list_file"
+	return 0
+}
+lock_acquire() {
+	local tries=0 owner
+	mkdir -p /var/lock || return 1
+	while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+		owner="$(cat "$LOCK_DIR/pid" 2>/dev/null)"
+		if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then rm -rf "$LOCK_DIR"; continue; fi
+		tries=$((tries + 1))
+		if [ "$tries" -ge 30 ]; then
+			logger -t redsocks2 "Timed out waiting for service lock"
+			return 1
+		fi
+		sleep 1
+	done
+	echo "$$" > "$LOCK_DIR/pid"
+}
+lock_release() { rm -rf "$LOCK_DIR"; }
+stop_locked() {
+	service_stop /usr/sbin/redsocks2
+	rm -f "$PID_FILE"
+	nft delete table inet "$NFT_TABLE" 2>/dev/null || true
+}
+start_locked() {
+	local enabled=0 active_node= pid
+	stop_locked
+	migrate || return 1
+	config_load redsocks2
+	load_enabled() { config_get_bool enabled "$1" enabled 0; }
+	load_active() { config_get active_node "$1" active_node; }
+	config_foreach load_enabled redsocks2_base
+	[ "$enabled" = 1 ] || return 0
+	config_foreach load_active redsocks2_base
+	[ -n "$active_node" ] || { logger -t redsocks2 "No proxy node configured"; return 1; }
+	mkdir -p /var/etc
+	config_foreach gen_base redsocks2_base
+	gen_redirect "$active_node" || { logger -t redsocks2 "Invalid or incomplete active proxy node"; return 1; }
+	[ -s "$CFG_FILE" ] || return 1
+	/usr/sbin/redsocks2 -c "$CFG_FILE" -p "$PID_FILE" || return 1
 	sleep 1
-	iptables -t nat -X $CHAIN_NAME &> /dev/null
-	ipset destroy whitelist &> /dev/null
-	ipset destroy blacklist &> /dev/null
+	pid="$(cat "$PID_FILE" 2>/dev/null)"
+	case "$pid" in *[!0-9]*|"") pid= ;; esac
+	if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+		logger -t redsocks2 "redsocks2 process failed to start"
+		stop_locked
+		return 1
+	fi
+	NFT_SETUP_OK=0
+	config_foreach setup_nft_checked redsocks2_iptables
+	if [ "$NFT_SETUP_OK" != 1 ]; then
+		logger -t redsocks2 "Transparent proxy firewall setup failed"
+		stop_locked
+		return 1
+	fi
+	logger -t redsocks2 "Started successfully (TCP port $REDSOCKS2_LOCAL_PORT)"
+	return 0
 }
-
+setup_nft_checked() { setup_nft "$1" || return 1; NFT_SETUP_OK=1; }
 start() {
-
-	config_load 'redsocks2'
-	config_foreach if_enabled 'redsocks2_base'
-
-	config_foreach gen_config_base 'redsocks2_base'
-	config_foreach gen_config_redirect 'redsocks2_redirect'
-	config_foreach gen_config_autoproxy 'redsocks2_autoproxy'
-	config_foreach gen_config_ipcache 'redsocks2_ipcache'
-	config_foreach gen_config_udprelay 'redsocks2_udprelay'
-
-	service_start /usr/sbin/redsocks2 -c $CFG_FILE -p $PID_FILE
-
-	config_foreach redsocks2_iptables_start_instance 'redsocks2_iptables'
+	lock_acquire || return 1
+	start_locked
+	local result=$?
+	lock_release
+	return "$result"
 }
-
 stop() {
-	config_load 'redsocks2'
-	service_stop /usr/sbin/redsocks2 && rm -rf $PID_FILE
-	config_foreach redsocks2_iptables_stop_instance 'redsocks2_iptables'
+	lock_acquire || return 1
+	stop_locked
+	local result=$?
+	lock_release
+	return "$result"
+}
+restart() {
+	lock_acquire || return 1
+	stop_locked
+	start_locked
+	local result=$?
+	lock_release
+	return "$result"
 }

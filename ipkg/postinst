@@ -1,7 +1,10 @@
 #!/bin/sh
 [ -n "${IPKG_INSTROOT}" ] || {
 	( . /etc/uci-defaults/luci-redsocks2 ) && rm -f /etc/uci-defaults/luci-redsocks2
+	chmod 755 /usr/bin/redsocks2-update-chnroute /usr/bin/redsocks2-speedtest /usr/bin/redsocks2-subscription >/dev/null 2>&1
 	chmod 755 /etc/init.d/redsocks2 >/dev/null 2>&1
 	/etc/init.d/redsocks2 enable >/dev/null 2>&1
+	# Rebuild the LuCI menu tree so updated ACL dependencies take effect.
+	rm -f /tmp/luci-indexcache
 	exit 0
 }

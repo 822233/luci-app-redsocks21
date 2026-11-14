@@ -1,0 +1,358 @@
+#!/bin/sh
+# Import subscription URIs supported by the bundled Redsocks2 core.
+. /lib/functions.sh
+
+MODE="subscription"
+SUB=""
+MANUAL_FILE=""
+MANUAL_TYPE=""
+if [ "$1" = "--file" ]; then
+	MODE="manual"
+	MANUAL_FILE="$2"
+	[ "$MANUAL_FILE" = "/tmp/redsocks2-import.txt" ] || { echo "导入文件路径无效"; exit 1; }
+	shift 2
+	if [ "$1" = "--type" ]; then
+		MANUAL_TYPE="$2"
+		shift 2
+	fi
+	case "$MANUAL_TYPE" in auto|http-connect|https-connect|socks4|socks5) ;;
+		*) echo "批量导入协议无效"; exit 1;;
+	esac
+	[ -s "$MANUAL_FILE" ] || { rm -f "$MANUAL_FILE"; echo "导入内容为空"; exit 1; }
+else
+	SUB="$1"
+	case "$SUB" in ""|*[!A-Za-z0-9_]*) echo "订阅编号无效"; exit 1;; esac
+fi
+
+TMP="$(mktemp -d /tmp/redsocks2-sub.XXXXXX)" || exit 1
+cleanup() {
+	rm -rf "$TMP"
+	[ -n "$MANUAL_FILE" ] && rm -f "$MANUAL_FILE"
+}
+trap cleanup EXIT INT TERM
+RAW="$TMP/raw"
+LIST="$TMP/list"
+PARSED="$TMP/parsed"
+: > "$PARSED"
+
+config_load redsocks2
+if [ "$MODE" = "manual" ]; then
+	cp "$MANUAL_FILE" "$LIST" || { echo "读取导入内容失败"; exit 1; }
+else
+	config_get URL "$SUB" url
+	[ -n "$URL" ] || { echo "订阅地址为空"; exit 1; }
+
+	# URL is passed as a quoted argument; it is never evaluated as shell code.
+	if command -v curl >/dev/null 2>&1; then
+		curl -fsSL --connect-timeout 15 --max-time 90 --retry 1 -o "$RAW" -- "$URL" || {
+			echo "订阅下载失败"; exit 1;
+		}
+	elif command -v uclient-fetch >/dev/null 2>&1; then
+		uclient-fetch -q -T 90 -O "$RAW" "$URL" || { echo "订阅下载失败"; exit 1; }
+	else
+		echo "缺少 curl 或 uclient-fetch"; exit 1
+	fi
+
+	# Many providers return a Base64-encoded URI list.
+	if ! grep -q '://' "$RAW"; then
+		tr -d '\r\n ' < "$RAW" | tr '_-' '/+' | base64 -d > "$LIST" 2>/dev/null || {
+			echo "订阅内容既不是 URI 列表，也不是有效 Base64"; exit 1;
+		}
+	else
+		cp "$RAW" "$LIST"
+	fi
+fi
+
+remove_old_node() {
+	local section="$1" source=""
+	config_get source "$section" subscription_id
+	[ "$source" = "$SUB" ] && uci -q delete "redsocks2.$section"
+}
+
+decode_uri_component() {
+	case "$1" in
+		*%*)
+			printf '%s' "$1" | grep -Eq '%([^0-9A-Fa-f]|$|.[^0-9A-Fa-f])' && return 1
+			printf '%b' "$(printf '%s' "$1" | sed 's/%/\\x/g')"
+			;;
+		*) printf '%s' "$1" ;;
+	esac
+}
+
+decode_ss() {
+	local encoded
+	encoded="$(printf '%s' "$1" | tr '_-' '/+')"
+	case $((${#encoded} % 4)) in
+		2) encoded="${encoded}==";;
+		3) encoded="${encoded}=";;
+	esac
+	printf '%s' "$encoded" | base64 -d 2>/dev/null
+}
+
+# Check already configured nodes before appending a manual import.
+check_existing_node() {
+	local section="$1" current_proto="" current_host="" current_port="" current_user="" current_method="" current_pass=""
+	config_get current_proto "$section" proxy_type
+	config_get current_host "$section" ip
+	config_get current_port "$section" port
+	config_get current_user "$section" username
+	config_get current_method "$section" method
+	config_get current_pass "$section" password
+	[ -n "$current_proto" ] || current_proto="https-connect"
+	if [ "$current_proto" = "shadowsocks" ] && [ -z "$current_method" ]; then
+		current_method="$current_user"
+	fi
+	if [ "$current_proto" = "$proto" ] &&
+		[ "$current_host" = "$host" ] &&
+		[ "$current_port" = "$port" ] &&
+		{ [ "$proto" = "shadowsocks" ] && [ "$current_method" = "$method" ] || [ "$proto" != "shadowsocks" ] && [ "$current_user" = "$user" ]; } &&
+		[ "$current_pass" = "$pass" ]; then
+		duplicate=1
+	fi
+}
+
+# Protocol-level checks adapted from the MIT-licensed ProxyChecker project.
+# Probe a local dummy destination so detection does not depend on Google/Cloudflare
+# availability. Four short handshakes run concurrently for each endpoint.
+detect_proxy_protocol() {
+	local host="$1" port="$2" probe_dir=""
+	command -v curl >/dev/null 2>&1 || return 1
+	probe_dir="$(mktemp -d "$TMP/probe.XXXXXX")" || return 1
+
+	curl -ksSv --connect-timeout 1 --max-time 3 --proxy "https://$host:$port" --proxy-insecure -o /dev/null https://127.0.0.1:9/ > "$probe_dir/https" 2>&1 &
+	local https_pid=$!
+	curl -ksSv --connect-timeout 1 --max-time 3 --proxy "http://$host:$port" -o /dev/null https://127.0.0.1:9/ > "$probe_dir/http" 2>&1 &
+	local http_pid=$!
+	curl -ksSv --connect-timeout 1 --max-time 3 --proxy "socks5h://$host:$port" -o /dev/null http://127.0.0.1:9/ > "$probe_dir/socks5" 2>&1 &
+	local socks5_pid=$!
+	curl -ksSv --connect-timeout 1 --max-time 3 --proxy "socks4a://$host:$port" -o /dev/null http://127.0.0.1:9/ > "$probe_dir/socks4" 2>&1 &
+	local socks4_pid=$!
+
+	wait "$https_pid" 2>/dev/null
+	wait "$http_pid" 2>/dev/null
+	wait "$socks5_pid" 2>/dev/null
+	wait "$socks4_pid" 2>/dev/null
+
+	if grep -Eiq 'SSL connection using|SSL connection|TLSv[0-9.]+.*connection' "$probe_dir/https" &&
+		grep -Eiq 'CONNECT tunnel established|< HTTP/[0-9.]+ (200|403|407|502|503|504)' "$probe_dir/https"; then
+		echo "https-connect"
+	elif grep -Eiq 'CONNECT tunnel established|< HTTP/[0-9.]+ (200|403|407|502|503|504)' "$probe_dir/http"; then
+		echo "http-connect"
+	elif grep -Eiq 'SOCKS5 request granted|SOCKS5 connect to|SOCKS5.*authentication|No authentication method was acceptable' "$probe_dir/socks5"; then
+		echo "socks5"
+	elif grep -Eiq 'SOCKS4 request granted|SOCKS4 request rejected|SOCKS4 connect to' "$probe_dir/socks4"; then
+		echo "socks4"
+	else
+		rm -rf "$probe_dir"
+		return 1
+	fi
+	rm -rf "$probe_dir"
+	return 0
+}
+
+count=0
+skipped=0
+duplicates=0
+added=0
+while IFS= read -r line || [ -n "$line" ]; do
+	line="$(printf '%s' "$line" | tr -d '\r')"
+	case "$line" in ""|\#*) continue;; esac
+	fragment=""
+	case "$line" in *\#*) fragment="${line#*#}"; line="${line%%#*}";; esac
+	proto=""
+	auth=""
+	endpoint=""
+	host=""
+	port=""
+	user=""
+	pass=""
+	method=""
+	case "$line" in
+		https://*) proto="https-connect"; rest="${line#https://}";;
+		http://*) proto="http-connect"; rest="${line#http://}";;
+		socks4://*) proto="socks4"; rest="${line#socks4://}";;
+		socks5://*) proto="socks5"; rest="${line#socks5://}";;
+		ss://)
+			skipped=$((skipped+1)); continue;;
+		ss://*)
+			proto="shadowsocks"; rest="${line#ss://}"
+			# SIP002: base64(method:password)@host:port or method:password@host:port.
+			case "$rest" in
+				*@*) auth="${rest%%@*}"; endpoint="${rest#*@}";;
+				*) decoded="$(decode_ss "$rest")"
+				   case "$decoded" in *@*) auth="${decoded%%@*}"; endpoint="${decoded#*@}";; *) skipped=$((skipped+1)); continue;; esac;;
+			esac
+			case "$auth" in *:*) method="${auth%%:*}"; pass="${auth#*:}";; *) decoded="$(decode_ss "$auth")"; method="${decoded%%:*}"; pass="${decoded#*:}";; esac
+			method="$(decode_uri_component "$method")" || { skipped=$((skipped+1)); continue; }
+			pass="$(decode_uri_component "$pass")" || { skipped=$((skipped+1)); continue; }
+			;;
+		*) 
+			if [ "$MODE" = "manual" ] && [ -n "$MANUAL_TYPE" ]; then
+				proto="$MANUAL_TYPE"
+				rest="$line"
+			else
+				skipped=$((skipped+1)); continue
+			fi
+			;;
+	esac
+	if [ "$proto" != "shadowsocks" ]; then
+		case "$rest" in *@*) auth="${rest%%@*}"; endpoint="${rest#*@}";; *) endpoint="$rest";; esac
+		query=""
+		case "$endpoint" in
+			*\?*) query="${endpoint#*\?}"; endpoint="${endpoint%%\?*}";;
+		esac
+		# Custom HTTPS links encode "host:port" as URL-safe Base64 in the URL host.
+		# allowInsecure=1 is accepted; the bundled HTTPS CONNECT core already skips
+		# upstream proxy-certificate verification.
+		if [ "$proto" = "https-connect" ]; then
+			case "$endpoint" in
+				*:* ) ;;
+				*)
+					decoded="$(decode_ss "$endpoint")"
+					case "$decoded" in *:*) endpoint="$decoded";; esac
+					;;
+			esac
+		fi
+		case "$auth" in *:*) user="${auth%%:*}"; pass="${auth#*:}";; *) user="$auth";; esac
+		user="$(decode_uri_component "$user")" || { skipped=$((skipped+1)); continue; }
+		pass="$(decode_uri_component "$pass")" || { skipped=$((skipped+1)); continue; }
+	fi
+	# IPv4/domain endpoints only; the current core's IPv6 support is not verified.
+	case "$endpoint" in *:*) host="${endpoint%:*}"; port="${endpoint##*:}";; *) skipped=$((skipped+1)); continue;; esac
+	case "$host" in ""|*\[*|*\]*|*[!A-Za-z0-9._-]*) skipped=$((skipped+1)); continue;; esac
+	case "$port" in ""|*[!0-9]*) skipped=$((skipped+1)); continue;; esac
+	[ "$port" -ge 1 ] 2>/dev/null && [ "$port" -le 65535 ] 2>/dev/null || { skipped=$((skipped+1)); continue; }
+	# Bare IP:port rows are detected in the bounded-concurrency phase below.
+	# Explicit share-link schemes are parsed directly and never probed.
+	if printf '%s' "$user$pass$method" | grep -q '[|[:cntrl:]]'; then
+		skipped=$((skipped+1))
+		continue
+	fi
+	if [ "$proto" = "shadowsocks" ]; then
+		[ -n "$method" ] && [ -n "$pass" ] || { skipped=$((skipped+1)); continue; }
+		case "$method" in
+			table|rc4|rc4-md5|aes-128-cfb|aes-192-cfb|aes-256-cfb|bf-cfb|camellia-128-cfb|camellia-192-cfb|camellia-256-cfb|cast5-cfb|des-cfb|idea-cfb|rc2-cfb|seed-cfb) ;;
+			*) skipped=$((skipped+1)); continue;;
+		esac
+		user=""
+	fi
+	name="$(decode_uri_component "$fragment" 2>/dev/null)" || name="$fragment"
+	[ -n "$name" ] || name="$host:$port"
+	# Keep the importer output delimiter-safe and bounded.
+	name="$(printf '%s' "$name" | tr -d '|[:cntrl:]' | cut -c1-96)"
+	[ -n "$name" ] || name="$host:$port"
+	printf '%s|%s|%s|%s|%s|%s|%s\n' "$proto" "$host" "$port" "$user" "$pass" "$method" "$name" >> "$PARSED"
+	count=$((count+1))
+done < "$LIST"
+
+# Detect bare IP:port entries concurrently (3 endpoints at a time; each endpoint
+# runs four protocol handshakes in parallel). Explicit share links never enter
+# this phase because their protocol was parsed from the URI scheme.
+if [ "$MODE" = "manual" ] && [ "$MANUAL_TYPE" = "auto" ]; then
+	cp "$PARSED" "$TMP/parsed-before-detect" || exit 1
+	index=0
+	running=0
+	while IFS='|' read -r proto host port user pass method name; do
+		index=$((index+1))
+		[ "$proto" = "auto" ] || continue
+		(
+			detected="$(detect_proxy_protocol "$host" "$port" 2>/dev/null)" || detected="unknown"
+			printf '%s\n' "$detected" > "$TMP/detect.$index"
+		) &
+		running=$((running+1))
+		if [ "$running" -ge 3 ]; then
+			wait
+			running=0
+		fi
+	done < "$TMP/parsed-before-detect"
+	[ "$running" -eq 0 ] || wait
+
+	: > "$PARSED"
+	index=0
+	while IFS='|' read -r proto host port user pass method name; do
+		index=$((index+1))
+		if [ "$proto" = "auto" ]; then
+			detected="$(cat "$TMP/detect.$index" 2>/dev/null)"
+			case "$detected" in
+				http-connect|https-connect|socks4|socks5) proto="$detected";;
+				*)
+					echo "自动检测失败：$host:$port（握手未能识别，可能离线、需要认证或协议不受支持）" >&2
+					skipped=$((skipped+1))
+					continue
+					;;
+			esac
+		fi
+		printf '%s|%s|%s|%s|%s|%s|%s\n' "$proto" "$host" "$port" "$user" "$pass" "$method" "$name" >> "$PARSED"
+	done < "$TMP/parsed-before-detect"
+fi
+
+# Remove exact duplicate imported entries while preserving their original order.
+awk -F '|' '!seen[$1 FS $2 FS $3 FS $4 FS $5 FS $6]++' "$PARSED" > "$TMP/unique"
+mv "$TMP/unique" "$PARSED"
+count="$(wc -l < "$PARSED" | tr -d ' ')"
+
+[ "$count" -gt 0 ] || { echo "没有找到可导入的支持协议节点（跳过 $skipped 条）"; exit 1; }
+
+# Only replace nodes belonging to this subscription after at least one valid
+# node has been parsed; manually created nodes are untouched.
+if [ "$MODE" = "subscription" ]; then
+	config_foreach remove_old_node redsocks2_node
+fi
+first_imported=""
+while IFS='|' read -r proto host port user pass method name; do
+	if [ "$MODE" = "manual" ]; then
+		duplicate=0
+		config_foreach check_existing_node redsocks2_node
+		if [ "$duplicate" -eq 1 ]; then
+			duplicates=$((duplicates+1))
+			continue
+		fi
+	fi
+	section="$(uci add redsocks2 redsocks2_node)"
+	[ -n "$section" ] || continue
+	[ -n "$first_imported" ] || first_imported="$section"
+	uci set "redsocks2.$section.name=$name"
+	uci set "redsocks2.$section.proxy_type=$proto"
+	uci set "redsocks2.$section.ip=$host"
+	uci set "redsocks2.$section.port=$port"
+	if [ "$proto" = "shadowsocks" ]; then
+		uci set "redsocks2.$section.method=$method"
+		uci -q delete "redsocks2.$section.username"
+	else
+		uci set "redsocks2.$section.username=$user"
+		uci -q delete "redsocks2.$section.method"
+	fi
+	uci set "redsocks2.$section.password=$pass"
+	if [ "$MODE" = "subscription" ]; then
+		uci set "redsocks2.$section.subscription_id=$SUB"
+	fi
+	added=$((added+1))
+done < "$PARSED"
+
+# If UCI could not create any imported section, discard staged deletions
+# so the previous subscription remains intact.
+if [ -z "$first_imported" ]; then
+	if [ "$MODE" = "manual" ] && [ "$duplicates" -gt 0 ]; then
+		echo "节点均已存在，未重复添加（重复 $duplicates 条，跳过不支持或格式错误 $skipped 条）"
+		exit 0
+	fi
+	uci revert redsocks2
+	echo "导入失败：无法创建节点，已保留原配置"
+	exit 1
+fi
+
+# Point active_node at the first imported node only if the old active node
+# was removed or no active node exists.
+active="$(uci -q get redsocks2.@redsocks2_base[0].active_node)"
+if [ -z "$active" ] || ! uci -q get "redsocks2.$active" >/dev/null 2>&1; then
+	[ -n "$first_imported" ] && uci set "redsocks2.@redsocks2_base[0].active_node=$first_imported"
+fi
+uci commit redsocks2
+if [ "$MODE" = "subscription" ]; then
+	printf '导入成功：%s 个新增支持节点；跳过 %s 条不支持或格式错误的记录；重复 %s 条。\n' "$added" "$skipped" "$duplicates" > "/tmp/redsocks2-subscription-$SUB"
+fi
+if ! /etc/init.d/redsocks2 restart; then
+	echo "节点已导入，但代理服务重启失败" >&2
+	exit 1
+fi
+echo "导入完成：新增 $added 个节点，跳过 $skipped 条，重复 $duplicates 条"

@@ -13,5 +13,20 @@ uci -q batch <<-EOF >/dev/null
 	commit firewall
 EOF
 
+# Install a weekly updater without duplicating the cron entry on upgrades.
+chmod 755 /usr/bin/redsocks2-update-chnroute 2>/dev/null || true
+mkdir -p /etc/crontabs
+touch /etc/crontabs/root
+if ! grep -Fq '/usr/bin/redsocks2-update-chnroute' /etc/crontabs/root; then
+	echo '23 4 * * 1 /usr/bin/redsocks2-update-chnroute --quiet >/dev/null 2>&1' >> /etc/crontabs/root
+fi
+/etc/init.d/cron restart >/dev/null 2>&1 || true
+
+# Fetch the first list during installation. A failed download does not break
+# package installation; the updater keeps any existing valid list untouched.
+if [ -x /usr/bin/redsocks2-update-chnroute ]; then
+	/usr/bin/redsocks2-update-chnroute --quiet || true
+fi
+
 rm -f /tmp/luci-indexcache
 exit 0

@@ -1,0 +1,38 @@
+Redsocks2 LuCI 1.0.3
+====================
+
+- Separate ordinary proxy usernames from the Shadowsocks cipher selector using an independent UCI option; migrate legacy cipher values transparently and map the value to the Redsocks2 core's login field.
+- Preserve each Shadowsocks cipher in the subscription import staging format and include it in duplicate detection.
+- Add subscriptions directly from a pasted URL, persist them before background import, auto-name from the URL fragment or hostname, and reuse duplicate URLs.
+
+
+- Add selectable webpage connectivity targets and a custom HTTP/HTTPS URL.
+- Measure webpage time to first byte separately from full download throughput.
+- Verify HTTPS proxy certificates instead of disabling certificate checks.
+- Add isolated ss-local based Shadowsocks webpage testing when ss-local is installed.
+- Clean up temporary Shadowsocks processes, PID files and configuration after testing.
+- Deduplicate subscription nodes by protocol, endpoint and credentials before import.
+- Preserve the active node when it still exists; otherwise select the first newly imported node.
+- Decode percent-encoded subscription credentials and validate supported Shadowsocks ciphers.
+- Keep the previous subscription configuration if UCI cannot create replacement nodes.
+- Register the local LuCI package in the ImmortalWrt SDK package tree and check shell syntax before compilation.
+- Replace the inline node editor with the native LuCI GridSection add/edit modal.
+- Add manual multi-line share-link import in Basic Settings.
+- Reuse the existing subscription URI importer for manual imports, preserving its protocol validation and duplicate filtering.
+- Decode URL-safe Base64 HTTPS endpoints such as https://BASE64(host:port)?allowInsecure=1#name.
+- Manual imports append nodes without deleting existing manually configured nodes.
+- Correct the RPC file ACL to authorize executable paths rather than command strings with arguments.
+- Attach the application ACL dependency directly to the Basic Settings route.
+
+Compatibility note:
+- IPv6 proxy endpoints remain excluded from subscription import because IPv6 support in the bundled Redsocks2 core has not been verified.
+- Shadowsocks webpage testing requires a compatible ss-local executable; it is optional and is not a hard package dependency.
+
+- Fix the SDK workflow release assertion to match the package release (the previous workflow stopped before compilation because it still expected r8 while Makefile was r10).
+- Add TXT upload and paste import for newline-separated IP:port proxy lists. The importer supports a selectable common protocol, validates endpoints and ports, filters duplicates, preserves existing manually configured nodes, and reports added/skipped counts.
+
+- Add a dedicated LuCI batch-import page with native TXT upload and selectable HTTP CONNECT / HTTPS CONNECT / SOCKS4 / SOCKS5 protocol for plain IP:port lists.
+- Align SDK preparation and IPK version assertions with release 1.0.3-r12; check the import page syntax and packaged payload.
+
+- Correct the release-12 workflow file-integrity check and align all SDK/IPK assertions with release 1.0.3-r13.
+- Ensure empty uploaded text files are removed after validation failure.

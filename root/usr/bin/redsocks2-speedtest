@@ -1,0 +1,251 @@
+#!/bin/sh
+# Real HTTPS-over-HTTPS-proxy probe and download benchmark for Redsocks2 nodes.
+# Router-originated traffic is not redirected by the LAN prerouting nftables rule.
+
+. /lib/functions.sh
+
+LOCK_DIR="/var/lock/redsocks2-speedtest.lock"
+RESULT_PREFIX="/tmp/redsocks2-speedtest-"
+DOWNLOAD_FILE=""
+RESULT_TMP=""
+CREDENTIAL_FILE=""
+SS_CONFIG_FILE=""
+SS_PID_FILE=""
+SS_PID=""
+TEST_TARGET="google"
+CUSTOM_TEST_URL=""
+
+write_result() {
+	local section="$1" status="$2" latency="$3" speed="$4" code="$5" message="$6"
+	local tested
+	tested="$(date '+%Y-%m-%d %H:%M:%S')"
+	RESULT_TMP="$(mktemp /tmp/redsocks2-speedtest.XXXXXX)" || return 1
+	printf '%s|%s|%s|%s|%s|%s\n' "$status" "$latency" "$speed" "$code" "$tested" "$message" > "$RESULT_TMP"
+	chmod 0600 "$RESULT_TMP"
+	mv -f "$RESULT_TMP" "${RESULT_PREFIX}${section}"
+	RESULT_TMP=""
+}
+
+cleanup() {
+	[ -n "$DOWNLOAD_FILE" ] && rm -f "$DOWNLOAD_FILE"
+	[ -n "$RESULT_TMP" ] && rm -f "$RESULT_TMP"
+	[ -n "$CREDENTIAL_FILE" ] && rm -f "$CREDENTIAL_FILE"
+	[ -n "$SS_PID" ] && kill "$SS_PID" 2>/dev/null || true
+	[ -n "$SS_CONFIG_FILE" ] && rm -f "$SS_CONFIG_FILE"
+	[ -n "$SS_PID_FILE" ] && rm -f "$SS_PID_FILE"
+	rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+mkdir -p /var/lock
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+	echo "测速任务正在运行，请稍后再试"
+	exit 1
+fi
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if ! command -v curl >/dev/null 2>&1; then
+	echo "未安装 curl"
+	exit 1
+fi
+
+config_load redsocks2
+
+load_test_options() {
+	config_get TEST_TARGET "$1" test_target google
+	config_get CUSTOM_TEST_URL "$1" test_url
+}
+config_foreach load_test_options redsocks2_base
+
+run_curl() {
+	if [ -n "$CREDENTIAL_FILE" ]; then
+		curl --silent --show-error --location --proxy "$proxy_url" $proxy_extra --noproxy "" --config "$CREDENTIAL_FILE" "$@"
+	else
+		curl --silent --show-error --location --proxy "$proxy_url" $proxy_extra --noproxy "" "$@"
+	fi
+}
+
+clear_credential_file() {
+	[ -n "$CREDENTIAL_FILE" ] && rm -f "$CREDENTIAL_FILE"
+	CREDENTIAL_FILE=""
+	[ -n "$SS_PID" ] && kill "$SS_PID" 2>/dev/null || true
+	SS_PID=""
+	[ -n "$SS_CONFIG_FILE" ] && rm -f "$SS_CONFIG_FILE"
+	SS_CONFIG_FILE=""
+	[ -n "$SS_PID_FILE" ] && rm -f "$SS_PID_FILE"
+	SS_PID_FILE=""
+}
+
+json_escape() {
+	printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+test_node() {
+	local section="$1" name="" host="" port="" username="" password="" proxy_url="" proxy_type="" proxy_extra=""
+	local probe="" code="" elapsed="" latency="" download_result="" bytes="" seconds="" speed=""
+	local url="" speed_url="" reason=""
+
+	case "$section" in
+		""|*[!A-Za-z0-9_]*) return 0 ;;
+	esac
+
+	config_get name "$section" name "$section"
+	config_get host "$section" ip
+	config_get port "$section" port
+	config_get username "$section" username
+	config_get password "$section" password
+	config_get proxy_type "$section" proxy_type https-connect
+	
+	case "$host" in
+		""|*[!A-Za-z0-9.:_%\-]*) write_result "$section" FAIL 0 0 0 "服务器地址格式无效"; return 0 ;;
+	esac
+	case "$port" in
+		""|*[!0-9]*) write_result "$section" FAIL 0 0 0 "端口格式无效"; return 0 ;;
+	esac
+	[ "$port" -ge 1 ] 2>/dev/null && [ "$port" -le 65535 ] 2>/dev/null || {
+		write_result "$section" FAIL 0 0 0 "端口超出范围"
+		return 0
+	}
+
+	case "$host" in
+		*:* ) host="[$host]" ;;
+	esac
+	case "$proxy_type" in
+		https-connect) proxy_url="https://$host:$port"; proxy_extra="" ;;
+		http-connect) proxy_url="http://$host:$port" ;;
+		socks4) proxy_url="socks4a://$host:$port" ;;
+		socks5) proxy_url="socks5h://$host:$port" ;;
+		shadowsocks)
+			if ! command -v ss-local >/dev/null 2>&1; then
+				write_result "$section" FAIL 0 0 0 "未检测到 ss-local，当前系统缺少兼容的 Shadowsocks 本地客户端"
+				return 0
+			fi
+			if [ -z "$username" ] || [ -z "$password" ] || printf '%s' "$username$password" | grep -q '[[:cntrl:]]'; then
+				write_result "$section" FAIL 0 0 0 "Shadowsocks 加密方法或密码无效"
+				return 0
+			fi
+			SHELL_PID=$$
+			SS_LOCAL_PORT=$((20000 + (SHELL_PID % 40000)))
+			SS_CONFIG_FILE="$(mktemp /tmp/redsocks2-ss.XXXXXX)" || {
+				write_result "$section" FAIL 0 0 0 "无法创建 Shadowsocks 临时配置"
+				return 0
+			}
+			SS_PID_FILE="/var/run/redsocks2-ss-local-$SHELL_PID.pid"
+			ss_host="$(json_escape "$host")"
+			ss_method="$(json_escape "$username")"
+			ss_password="$(json_escape "$password")"
+			cat > "$SS_CONFIG_FILE" <<EOF
+{
+	"server": "$ss_host",
+	"server_port": $port,
+	"local_address": "127.0.0.1",
+	"local_port": $SS_LOCAL_PORT,
+	"password": "$ss_password",
+	"method": "$ss_method",
+	"timeout": 10,
+	"mode": "tcp_only"
+}
+EOF
+			chmod 0600 "$SS_CONFIG_FILE"
+			ss-local -c "$SS_CONFIG_FILE" -f "$SS_PID_FILE" >/dev/null 2>&1 || {
+				write_result "$section" FAIL 0 0 0 "启动 ss-local 失败"
+				clear_credential_file
+				return 0
+			}
+			for wait_try in 1 2 3 4 5; do
+				[ -s "$SS_PID_FILE" ] && break
+				sleep 1
+			done
+			SS_PID="$(cat "$SS_PID_FILE" 2>/dev/null)"
+			case "$SS_PID" in ""|*[!0-9]*) write_result "$section" FAIL 0 0 0 "ss-local 未能启动"; clear_credential_file; return 0;; esac
+			kill -0 "$SS_PID" 2>/dev/null || {
+				write_result "$section" FAIL 0 0 0 "ss-local 启动后退出"
+				clear_credential_file
+				return 0
+			}
+			proxy_url="socks5h://127.0.0.1:$SS_LOCAL_PORT"
+			proxy_extra=""
+			;;
+		*) write_result "$section" FAIL 0 0 0 "不支持的代理类型"; return 0 ;;
+	 esac
+
+	# Keep credentials out of the curl process command line and reject control
+	# characters that could inject additional curl-config directives.
+	if [ "$proxy_type" != "shadowsocks" ] && printf '%s' "$username$password" | grep -q '[[:cntrl:]]'; then
+		write_result "$section" FAIL 0 0 0 "认证信息包含非法控制字符"
+		return 0
+	fi
+	if [ "$proxy_type" != "shadowsocks" ] && [ -n "$username" ]; then
+		CREDENTIAL_FILE="$(mktemp /tmp/redsocks2-curl.XXXXXX)" || {
+			write_result "$section" FAIL 0 0 0 "无法创建认证临时文件"
+			return 0
+		}
+		chmod 0600 "$CREDENTIAL_FILE"
+		escaped_credentials="$(printf '%s' "$username:$password" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+		printf 'proxy-user = "%s"\n' "$escaped_credentials" > "$CREDENTIAL_FILE"
+	fi
+
+	# Use the exact connectivity target selected in LuCI.
+	case "$TEST_TARGET" in
+		""|google) url="https://www.google.com/generate_204" ;;
+		cloudflare) url="https://cp.cloudflare.com/generate_204" ;;
+		baidu) url="https://www.baidu.com/" ;;
+		bing) url="https://www.bing.com/" ;;
+		github) url="https://github.com/" ;;
+		custom)
+			case "$CUSTOM_TEST_URL" in
+				https://*|http://*) url="$CUSTOM_TEST_URL" ;;
+				*) write_result "$section" FAIL 0 0 0 "请填写有效的 HTTP/HTTPS 自定义测速地址"; clear_credential_file; return 0 ;;
+			esac
+			;;
+		*) write_result "$section" FAIL 0 0 0 "未知测速地址选项"; clear_credential_file; return 0 ;;
+	esac
+	probe="$(run_curl --connect-timeout 10 --max-time 20 -o /dev/null -w '%{http_code}|%{time_starttransfer}' "$url" 2>/dev/null)"
+	code="${probe%%|*}"
+	elapsed="${probe#*|}"
+
+	case "$code" in
+		200|204) ;;
+		*) write_result "$section" FAIL 0 0 "${code:-000}" "网页连通性测试失败"; clear_credential_file; return 0 ;;
+	esac
+
+	latency="$(awk -v t="$elapsed" 'BEGIN { if (t ~ /^[0-9.]+$/) printf "%.0f", t * 1000; else print 0 }')"
+
+	DOWNLOAD_FILE="$(mktemp /tmp/redsocks2-download.XXXXXX)" || {
+		write_result "$section" FAIL "$latency" 0 "$code" "无法创建测速临时文件"
+		clear_credential_file
+		return 0
+	}
+
+	# Download a fixed-size payload; retry with a second provider if necessary.
+	for speed_url in "https://speed.cloudflare.com/__down?bytes=3000000" "https://proof.ovh.net/files/1Mb.dat"; do
+		download_result="$(run_curl --connect-timeout 10 --max-time 35 -o "$DOWNLOAD_FILE" -w '%{http_code}|%{size_download}|%{time_total}' "$speed_url" 2>/dev/null)"
+		code="${download_result%%|*}"
+		download_result="${download_result#*|}"
+		bytes="${download_result%%|*}"
+		seconds="${download_result#*|}"
+		if [ "$code" = 200 ] && awk -v n="$bytes" 'BEGIN { exit !(n >= 100000) }'; then
+			break
+		fi
+		bytes=0
+	done
+
+	rm -f "$DOWNLOAD_FILE"
+	DOWNLOAD_FILE=""
+
+	if [ "$code" != 200 ] || ! awk -v n="$bytes" 'BEGIN { exit !(n >= 100000) }'; then
+		write_result "$section" FAIL "$latency" 0 "$code" "网页可访问，但下载测速失败"
+		clear_credential_file
+		return 0
+	fi
+
+	speed="$(awk -v n="$bytes" -v t="$seconds" 'BEGIN { if (t > 0) printf "%.2f", n / t / 1048576; else print 0 }')"
+	write_result "$section" OK "$latency" "$speed" "$code" "网页和下载测试通过"
+	clear_credential_file
+}
+
+if [ "${1:-}" = "--all" ]; then
+	config_foreach test_node redsocks2_node
+	exit 0
+fi
+
+test_node "${1:-}"
