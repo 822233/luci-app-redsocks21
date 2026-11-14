@@ -11,7 +11,7 @@ function index()
 		"Redsocks2")
 
 	local general = entry({"admin", "services", "redsocks2", "general"},
-		view("redsocks2/general-r15"),
+		view("redsocks2/general-r16"),
 		"基本设置", 10)
 	general.leaf = true
 	general.acl_depends = { "luci-app-redsocks2" }
