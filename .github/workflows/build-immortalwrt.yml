@@ -74,9 +74,9 @@ jobs:
             cp -a "$GITHUB_WORKSPACE/po" package/luci-app-redsocks2/
           fi
           test -f package/luci-app-redsocks2/Makefile
-          grep -Fx 'PKG_RELEASE:=13' package/luci-app-redsocks2/Makefile
+          grep -Fx 'PKG_RELEASE:=15' package/luci-app-redsocks2/Makefile
           test -f package/luci-app-redsocks2/luasrc/controller/redsocks2.lua
-          test -f package/luci-app-redsocks2/htdocs/luci-static/resources/view/redsocks2/general.js
+          test -f package/luci-app-redsocks2/htdocs/luci-static/resources/view/redsocks2/general-r15.js
           test -f package/luci-app-redsocks2/htdocs/luci-static/resources/view/redsocks2/import.js
           test -f feeds/luci/luci.mk
           make defconfig
@@ -94,6 +94,7 @@ jobs:
       - name: LuCI JavaScript 语法检查
         run: |
           node --check "$GITHUB_WORKSPACE/htdocs/luci-static/resources/view/redsocks2/general.js"
+          node --check "$GITHUB_WORKSPACE/htdocs/luci-static/resources/view/redsocks2/general-r15.js"
           node --check "$GITHUB_WORKSPACE/htdocs/luci-static/resources/view/redsocks2/import.js"
           python3 -m json.tool "$GITHUB_WORKSPACE/root/usr/share/rpcd/acl.d/luci-app-redsocks2.json" >/dev/null
 
@@ -126,13 +127,13 @@ jobs:
             printf '%s\n' "$control" | grep -Eq '^Version: [^[:space:]]+'
             printf '%s\n' "$control" | grep -Eq '^Architecture: [^[:space:]]+'
             if [ "$expected" = "luci-app-redsocks2" ]; then
-              printf '%s\n' "$control" | grep -Fx 'Version: 1.0.3-r13'
+              printf '%s\n' "$control" | grep -Fx 'Version: 1.0.3-r15'
               data_member="$(printf '%s\n' "$members" | grep -m1 -E '(^|/)data.tar.gz$')"
               test -n "$data_member"
               data_members="$(tar -xzOf "$ipk" "$data_member" | tar -tzf -)"
               printf '%s\n' "$data_members" | grep -Eq '(^|/)usr/lib/lua/luci/controller/redsocks2\.lua$'
               printf '%s\n' "$data_members" | grep -Eq '(^|/)usr/share/rpcd/acl\.d/luci-app-redsocks2\.json$'
-              printf '%s\n' "$data_members" | grep -Eq '(^|/)www/luci-static/resources/view/redsocks2/general\.js$'
+              printf '%s\n' "$data_members" | grep -Eq '(^|/)www/luci-static/resources/view/redsocks2/general-r15\.js$'
               printf '%s\n' "$data_members" | grep -Eq '(^|/)www/luci-static/resources/view/redsocks2/import\.js$'
               printf '%s\n' "$data_members" | grep -Eq '(^|/)usr/bin/redsocks2-subscription$'
               controller="$(tar -xzOf "$ipk" "$data_member" | tar -xzOf - ./usr/lib/lua/luci/controller/redsocks2.lua)"
