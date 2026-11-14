@@ -1,0 +1,37 @@
+--- a/encrypt.c
++++ b/encrypt.c
+@@ -567,7 +567,9 @@
+     }
+     if (!EVP_CipherInit_ex(evp, cipher, NULL, NULL, NULL, enc)) {
+         // annot initialize cipher
++        EVP_CIPHER_CTX_free(evp);
++        ctx->evp = NULL;
+         return -1; 
+     }
+     if (!EVP_CIPHER_CTX_set_key_length(evp, info->key_len)) {
+@@ -665,8 +667,6 @@
+ #if defined(USE_CRYPTO_OPENSSL)
+     if (!EVP_CipherInit_ex(evp, NULL, NULL, true_key, iv, enc)) {
+-        EVP_CIPHER_CTX_free(evp);
+-        ctx->evp = NULL;
+         //FATAL("Cannot set key and IV");
+     }
+ #elif defined(USE_CRYPTO_POLARSSL)
+@@ -739,6 +739,8 @@
+ #if defined(USE_CRYPTO_OPENSSL)
+     cipher_evp_t *evp = ctx->evp;
++    if (evp == NULL)
++        return 0;
+ #else
+     cipher_evp_t *evp = &ctx->evp;
+ #endif
+--- a/shadowsocks.c
++++ b/shadowsocks.c
+@@ -340,7 +340,7 @@
+         redsocks_drop_client(client);
+         return -1;
+     }
+-    sclient->e_ctx_init = 1;
++    sclient->d_ctx_init = 1;
+ 
+     /* build and send header */
