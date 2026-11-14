@@ -133,7 +133,7 @@ jobs:
               data_members="$(tar -xzOf "$ipk" "$data_member" | tar -tzf -)"
               printf '%s\n' "$data_members" | grep -Eq '(^|/)usr/lib/lua/luci/controller/redsocks2\.lua$'
               printf '%s\n' "$data_members" | grep -Eq '(^|/)usr/share/rpcd/acl\.d/luci-app-redsocks2\.json$'
-              printf '%s\n' "$data_members" | grep -Eq '(^|/)www/luci-static/resources/view/redsocks2/general-r15\.js$'
+              printf '%s\n' "$data_members" | grep -Eq '(^|/)www/luci-static/resources/view/redsocks2/general-r16\.js$'
               printf '%s\n' "$data_members" | grep -Eq '(^|/)www/luci-static/resources/view/redsocks2/import\.js$'
               printf '%s\n' "$data_members" | grep -Eq '(^|/)usr/bin/redsocks2-subscription$'
               controller="$(tar -xzOf "$ipk" "$data_member" | tar -xzOf - ./usr/lib/lua/luci/controller/redsocks2.lua)"
