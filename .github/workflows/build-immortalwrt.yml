@@ -10,6 +10,13 @@ on:
   push:
     branches:
       - immortalwrt-24.10-https
+      - maintenance-r16-cleanup
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - master
+      - immortalwrt-24.10-https
 
 permissions:
   contents: write
@@ -74,7 +81,10 @@ jobs:
             cp -a "$GITHUB_WORKSPACE/po" package/luci-app-redsocks2/
           fi
           test -f package/luci-app-redsocks2/Makefile
-          grep -Fx 'PKG_RELEASE:=16' package/luci-app-redsocks2/Makefile
+          PKG_VERSION="$(sed -n 's/^PKG_VERSION:=//p' package/luci-app-redsocks2/Makefile)"
+          PKG_RELEASE="$(sed -n 's/^PKG_RELEASE:=//p' package/luci-app-redsocks2/Makefile)"
+          test -n "$PKG_VERSION" && test -n "$PKG_RELEASE"
+          echo "APP_VERSION=${PKG_VERSION}-r${PKG_RELEASE}" >> "$GITHUB_ENV"
           test -f package/luci-app-redsocks2/luasrc/controller/redsocks2.lua
           test -f package/luci-app-redsocks2/htdocs/luci-static/resources/view/redsocks2/general-r16.js
           test -f package/luci-app-redsocks2/htdocs/luci-static/resources/view/redsocks2/import.js
@@ -93,7 +103,6 @@ jobs:
 
       - name: LuCI JavaScript 语法检查
         run: |
-          node --check "$GITHUB_WORKSPACE/htdocs/luci-static/resources/view/redsocks2/general.js"
           node --check "$GITHUB_WORKSPACE/htdocs/luci-static/resources/view/redsocks2/general-r16.js"
           node --check "$GITHUB_WORKSPACE/htdocs/luci-static/resources/view/redsocks2/import.js"
           python3 -m json.tool "$GITHUB_WORKSPACE/root/usr/share/rpcd/acl.d/luci-app-redsocks2.json" >/dev/null
@@ -127,7 +136,7 @@ jobs:
             printf '%s\n' "$control" | grep -Eq '^Version: [^[:space:]]+'
             printf '%s\n' "$control" | grep -Eq '^Architecture: [^[:space:]]+'
             if [ "$expected" = "luci-app-redsocks2" ]; then
-              printf '%s\n' "$control" | grep -Fx 'Version: 1.0.3-r16'
+              printf '%s\n' "$control" | grep -Fx "Version: $APP_VERSION"
               data_member="$(printf '%s\n' "$members" | grep -m1 -E '(^|/)data.tar.gz$')"
               test -n "$data_member"
               data_members="$(tar -xzOf "$ipk" "$data_member" | tar -tzf -)"
@@ -156,23 +165,25 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+      - name: 校验 Release 标签与软件包版本
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          test "$GITHUB_REF_NAME" = "v$APP_VERSION"
+
       - name: 发布到 GitHub Releases
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.3-r16
-          name: Redsocks2 v1.0.3-r16（ImmortalWrt 24.10 / MT7981）
+          tag_name: ${{ github.ref_name }}
+          name: Redsocks2 ${{ github.ref_name }}（ImmortalWrt 24.10 / MT7981）
           body: |
-            ## Redsocks2 r16
+            ## Redsocks2 ${{ github.ref_name }}
 
-            - LuCI 管理插件版本：1.0.3-r16
-            - 核心包版本：20170730-r3（核心源码未因本次 r16 界面调整而修改）
+            - LuCI 管理插件版本：${{ env.APP_VERSION }}
+            - 核心包版本：20170730-r3
             - 目标平台：ImmortalWrt 24.10 / MediaTek Filogic / aarch64 Cortex-A53
-            - r16 更新：优化基本设置页用户名与 Shadowsocks 加密方法标签及字段显示逻辑。
-            - TXT 批量导入页面保持原有自动检测协议行为。
-            
-            首次安装请安装核心和 LuCI 插件；已安装正常核心的用户升级时通常只需安装 LuCI 插件。
-            
-            当前仅支持 IPv4 TCP 透明代理，不支持 UDP、QUIC 或 IPv6 透明代理。
+            - 当前仅支持 IPv4 TCP 透明代理，不支持 UDP、QUIC 或 IPv6 透明代理。
+            - 请根据是否已安装核心，选择安装核心和 LuCI 插件或仅升级 LuCI 插件。
           files: dist/*
           fail_on_unmatched_files: true
         env:
