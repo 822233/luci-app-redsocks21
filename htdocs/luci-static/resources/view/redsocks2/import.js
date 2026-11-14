@@ -5,18 +5,8 @@
 
 return view.extend({
 	render: function() {
-		var protocol = E('select', {
-			'id': 'redsocks2-import-protocol',
-			'class': 'cbi-input-select'
-		}, [
-			E('option', { 'value': 'auto', 'selected': 'selected' }, _('自动检测协议（推荐）')),
-			E('option', { 'value': 'https-connect' }, _('HTTPS CONNECT')),
-			E('option', { 'value': 'http-connect' }, _('HTTP CONNECT')),
-			E('option', { 'value': 'socks5' }, _('SOCKS5')),
-			E('option', { 'value': 'socks4' }, _('SOCKS4'))
-		]);
 		var status = E('p', { 'class': 'cbi-section-descr' },
-			_('尚未导入。选择自动检测时，纯 IP:端口将自动识别协议；分享链接按协议头直接识别。'));
+			_('尚未导入。TXT 中的纯 IP:端口将自动识别协议；分享链接按协议头直接识别。'));
 		var button;
 		button = E('button', {
 			'class': 'cbi-button cbi-button-action important',
@@ -25,14 +15,12 @@ return view.extend({
 				button.disabled = true;
 				status.textContent = _('请选择 TXT 文件并上传…');
 				ui.uploadFile('/tmp/redsocks2-import.txt', null,
-					_('仅上传 TXT 节点列表；自动检测或按所选协议导入。')).then(function(upload) {
+					_('仅上传 TXT 节点列表；纯 IP:端口自动识别协议。')).then(function(upload) {
 					if (!upload || upload.size < 1 || upload.size > 1048576)
 						throw new Error(_('文件为空或超过 1 MB'));
-					status.textContent = protocol.value === 'auto'
-						? _('文件已上传，正在自动检测协议并导入节点…')
-						: _('文件已上传，正在按所选协议导入节点…');
+					status.textContent = _('文件已上传，正在自动识别协议并导入节点…');
 					return fs.exec('/usr/bin/redsocks2-subscription', [
-						'--file', '/tmp/redsocks2-import.txt', '--type', protocol.value
+						'--file', '/tmp/redsocks2-import.txt', '--type', 'auto'
 					]);
 				}).then(function(result) {
 					if (result.code !== 0)
@@ -44,16 +32,12 @@ return view.extend({
 					button.disabled = false;
 				});
 			}
-		}, _('选择 TXT 文件并导入'));
+		}, _('选择 TXT 文件并自动识别导入'));
 		return E('div', { 'class': 'cbi-map' }, [
 			E('h2', {}, _('Redsocks2 - 批量导入节点')),
 			E('p', { 'class': 'cbi-section-descr' },
-				_('上传 TXT 文本。纯 IP:端口可自动检测 HTTPS CONNECT、HTTP CONNECT、SOCKS5、SOCKS4；分享链接按协议头识别。')),
+				_('上传 TXT 文本。纯 IP:端口自动检测 HTTPS CONNECT、HTTP CONNECT、SOCKS5、SOCKS4；分享链接直接按协议头识别。')),
 			E('div', { 'class': 'cbi-section' }, [
-				E('div', { 'class': 'cbi-value' }, [
-					E('label', { 'class': 'cbi-value-title', 'for': 'redsocks2-import-protocol' }, _('节点协议')),
-					E('div', { 'class': 'cbi-value-field' }, [ protocol ])
-				]),
 				E('div', { 'class': 'cbi-value' }, [
 					E('div', { 'class': 'cbi-value-field' }, [ button ])
 				]),
