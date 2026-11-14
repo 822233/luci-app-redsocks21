@@ -160,7 +160,7 @@ jobs:
             printf '%s\n' "$control"
           done
           sha256sum "${ipks[@]}"
-          sha256sum "$GITHUB_WORKSPACE"/dist/*.ipk > "$GITHUB_WORKSPACE/dist/SHA256SUMS"
+          (cd "$GITHUB_WORKSPACE/dist" && sha256sum ./*.ipk > SHA256SUMS && sha256sum -c SHA256SUMS)
 
       - name: 上传编译产物
         uses: actions/upload-artifact@v4
